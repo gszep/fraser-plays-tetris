@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from tetris_school.layers import ConvolutionalBlock, Head
 
 

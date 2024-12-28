@@ -1,7 +1,8 @@
 import random
-from colorama import Fore, Style
+from collections import deque, namedtuple
+
 import matplotlib.pyplot as plt
-from collections import namedtuple, deque
+from colorama import Fore, Style
 
 Transition = namedtuple("Transition", ("state", "action", "next_state", "reward"))
 
@@ -9,7 +10,7 @@ Transition = namedtuple("Transition", ("state", "action", "next_state", "reward"
 class ReplayMemory(object):
 
     def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity)
+        self.memory: deque = deque([], maxlen=capacity)
 
     def push(self, *args):
         """Save a transition"""

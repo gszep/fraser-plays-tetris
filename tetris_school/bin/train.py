@@ -9,7 +9,7 @@ import torch.optim as optim
 
 from tetris_school.games import Tetris
 from tetris_school.model import Fraser
-from tetris_school.utils import ReplayMemory, Transition, plot, REWARD_UNICODE, GAME_OVER
+from tetris_school.utils import GAME_OVER, REWARD_UNICODE, ReplayMemory, Transition, plot
 
 
 def train(
@@ -114,11 +114,11 @@ def train(
                 param_prime.data.copy_(tau * param.data + (1.0 - tau) * param_prime.data)
 
             if game.done:  # collect and plot stats
-                stats["score"].append(game.score.item())
+                stats["score"].append(game.score.item())  # type: ignore
                 stats["temperature"].append(temperature)
 
                 if game.score > record:
-                    record = game.score.item()
+                    record = game.score.item()  # type: ignore
                     torch.save(model.state_dict(), ckpt_path)
 
                 plot(stats, yscale="symlog")
