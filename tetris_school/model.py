@@ -74,7 +74,7 @@ class Jordan(nn.Module):
         height_range = torch.arange(x.size(2)).to(x.device)
 
         floor = (height_range * (x == 1)).argmax(dim=-1)
-        cieling = (height_range * (x == 2)).argmax(dim=-1)
+        ceiling = (height_range * (x == 2)).argmax(dim=-1)
 
-        x = torch.cat([floor, cieling], dim=-1)
+        x = torch.cat([floor, ceiling], dim=-1)
         return x.float()
