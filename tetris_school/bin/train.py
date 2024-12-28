@@ -62,9 +62,9 @@ def train(
             temperature = max(temperature * anneal_factor, min_temperature)
 
             # perform action and get reward
-            next_state, reward, terminated, truncated, info = game.step(action)
+            next_state, reward, done, info = game.step(action)
 
-            if terminated:  # game over state
+            if done:  # game over state
                 next_state.fill_(GAME_OVER)
 
             # save transition to memory

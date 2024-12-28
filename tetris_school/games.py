@@ -1,11 +1,17 @@
-from typing import Optional, Union
+import math
 from enum import Enum
-import torch
-from torch.types import Device
+from functools import partial
+from typing import Optional, Union
+
+import gymnasium as gym
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pygame
-import gymnasium as gym
+import torch
 from gymnasium import spaces
+from jax import grad, jit, random, vmap
+from torch.types import Device
 
 # rgb colors
 WHITE = (255, 255, 255)
@@ -22,8 +28,9 @@ BLOCK_SIZE = 20
 
 
 class Tetris(gym.Env):
-    metadata = {"render_modes": ["human"], "render_fps": 100}
-    actions = Enum("Actions", "NOTHING RIGHT LEFT ROTATE", start=0)
+    metadata = {"render_modes": ["human"], "render_fps": 1000}
+    actions = Enum("actions", "NOTHING RIGHT LEFT ROTATE", start=0)
+    action_space = spaces.Discrete(4)
 
     def __init__(
         self,
@@ -42,9 +49,6 @@ class Tetris(gym.Env):
         # define size of game board
         self.width = width
         self.height = height
-
-        # we have 4 actions, corresponding to "nothing", "right", "left", "rotate"
-        self.action_space = spaces.Discrete(4)
 
         self.placedBlocks = torch.zeros((self.width, self.height), dtype=torch.int, device=self.device)
         self._reward = torch.tensor(0, dtype=torch.float, device=self.device)
@@ -146,7 +150,7 @@ class Tetris(gym.Env):
         }
 
     def _clear_rows(self):
-        isfull = self.placedBlocks.all(axis=0)
+        isfull = self.placedBlocks.all(axis=0)  # type: ignore
         num_full = sum(isfull)
 
         updatedBlocks = self.placedBlocks[:, ~isfull]
@@ -197,7 +201,7 @@ class Tetris(gym.Env):
             blocks = self.placedBlocks.clone()
             blocks[xp, yp] = 1
 
-            if blocks.all(axis=0).any():  # reward for full rows
+            if blocks.all(axis=0).any():  # type: ignore # reward for full rows
                 self.reward += 1
             else:  # penalize increase in board height
                 delta_height = yp.max() - self.board_height
@@ -219,7 +223,7 @@ class Tetris(gym.Env):
             self._clear_rows()
             self._new_shape()
 
-        terminated = self.terminated
+        done = self.done
         reward = self.reward.clone()
 
         observation = self._get_obs()
@@ -229,8 +233,7 @@ class Tetris(gym.Env):
             self._render_frame()
 
         self.iter += 1
-        truncated = self.truncated
-        return observation, reward, terminated, truncated, info
+        return observation, reward, done, info
 
     def move_shape(self, action: Union[int, torch.Tensor]):
         x, y = self.shape_inview
@@ -315,11 +318,11 @@ class Tetris(gym.Env):
             pygame.display.init()
 
             self.font = pygame.font.SysFont("arial", 25)
-            self.window = pygame.display.set_mode((BLOCK_SIZE * self.width, BLOCK_SIZE * self.height))
+            self.window = pygame.display.set_mode((BLOCK_SIZE * self.width, BLOCK_SIZE * self.height))  # type: ignore
             pygame.display.set_caption("Tetris")
 
         if self.clock is None and self.render_mode == "human":
-            self.clock = pygame.time.Clock()
+            self.clock = pygame.time.Clock()  # type: ignore
 
         canvas = pygame.Surface((BLOCK_SIZE * self.width, BLOCK_SIZE * self.height))
         canvas.fill(BLACK)
@@ -338,8 +341,9 @@ class Tetris(gym.Env):
         text = self.font.render(f"Score: {self.score}", True, WHITE)
 
         # The following line copies our drawings from `canvas` to the visible window
-        self.window.blit(text, [0, 0])
-        self.window.blit(canvas, canvas.get_rect())
+        if self.window is not None:
+            self.window.blit(text, [0, 0])
+            self.window.blit(canvas, canvas.get_rect())
 
         pygame.display.flip()
         pygame.event.pump()
@@ -347,9 +351,88 @@ class Tetris(gym.Env):
 
         # We need to ensure that human-rendering occurs at the predefined framerate.
         # The following line will automatically add a delay to keep the framerate stable.
-        self.clock.tick(self.metadata["render_fps"])
+        if self.clock is not None:
+            self.clock.tick(self.metadata["render_fps"])
 
     def close(self):
         if self.window is not None:
             pygame.display.quit()
             pygame.quit()
+
+
+class JAXEnv(gym.Env):
+
+    def __init__(self):
+        pass
+
+    @partial(jit, static_argnums=(0,))
+    def step(self, state_key, action):
+        state, key = state_key
+
+        state += 1
+        done = action > 0.5
+        reward = action
+
+        state_key, info = self.reset_conditional((state, key), done)
+        return state_key, reward, done, info
+
+    def _get_info(self):
+        return {
+            "score": 0,
+        }
+
+    def _get_obs(self, state_key):
+        state, _ = state_key
+        return state
+
+    def reset_conditional(self, state_key, done):
+        state, key = state_key
+        return jax.lax.cond(done, self.reset, lambda _: (state_key, self._get_info()), key)
+
+    @partial(jit, static_argnums=(0,))
+    def reset(self, key):
+        state = jnp.zeros(shape=(4,))
+        key, _ = random.split(key)
+
+        return (state, key), self._get_info()
+
+
+@vmap
+def run_episodes(key):
+
+    batch = {
+        "keys": random.split(key, MAX_STEPS),
+        "state": jnp.zeros(shape=(MAX_STEPS, 4)),
+        "reward": jnp.zeros(shape=(MAX_STEPS)),
+        "done": jnp.zeros(shape=(MAX_STEPS), dtype=jnp.bool_),
+    }
+
+    state_key, _ = env.reset(key)
+    (state_key, batch) = jax.lax.fori_loop(0, MAX_STEPS, step, (state_key, batch))
+    return batch
+
+
+def step(i, store):
+    state_key, batch = store
+    action = random.randint(batch["keys"][i], (1,), 0, 2)[0]
+
+    state_key, reward, done, info = env.step(state_key, action)
+    state, key = state_key
+
+    batch["state"] = batch["state"].at[i].set(state)
+    batch["reward"] = batch["reward"].at[i].set(reward)
+    batch["done"] = batch["done"].at[i].set(done)
+
+    return state_key, batch
+
+
+NUM_ENV = 7
+MAX_STEPS = 100
+
+keys = random.split(jax.random.PRNGKey(seed=0), NUM_ENV)
+env = JAXEnv()
+
+batch = run_episodes(keys)
+done = batch["done"]
+state = batch["state"][:, :, 0]
+jnp.mean(batch["done"])

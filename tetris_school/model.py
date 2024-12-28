@@ -27,7 +27,7 @@ class Fraser(nn.Module):
             x = layer(x)
 
         x = self.norm(x)
-        return self.head(x)
+        return self.head(x)  # type: ignore
 
     def state_transform(self, x: torch.Tensor) -> torch.Tensor:
         batch_size = x.size(0)
@@ -69,7 +69,7 @@ class Jordan(nn.Module):
             x = layer(x)
 
         x = self.norm(x)
-        return self.head(x)
+        return self.head(x)  # type: ignore
 
     def state_transform(self, x: torch.Tensor) -> torch.Tensor:
         height_range = torch.arange(x.size(2)).to(x.device)

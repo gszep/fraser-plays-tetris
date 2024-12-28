@@ -19,7 +19,7 @@ class ConvolutionalBlock(nn.Module):
         x = self.conv2(x)
         x = x.permute(dims=(0, 2, 3, 1))
 
-        return x
+        return x  # type: ignore
 
 
 class Head(nn.Module):
@@ -30,7 +30,7 @@ class Head(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.toaction = nn.Linear(embed_dim, num_actions)
 
-    def forward(self, x: torch.Tensor) -> dict:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         x = x.permute(dims=(0, 3, 1, 2))
         x = self.fc(x)
@@ -39,4 +39,4 @@ class Head(nn.Module):
         x = self.norm(x)
 
         x = x.mean(dim=(1, 2))
-        return self.toaction(x)
+        return self.toaction(x)  # type: ignore
