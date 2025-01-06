@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
 from typing import Optional, Union
@@ -12,7 +12,7 @@ import pygame
 import torch
 from gymnasium import spaces
 from jax import grad, jit, random, vmap
-from jaxtyping import Array
+from jaxtyping import Array, Bool, Float, PRNGKeyArray, Scalar, Shaped, UInt4
 from torch.types import Device
 
 # rgb colors
@@ -365,8 +365,28 @@ class Tetris(gym.Env):
 @jax.tree_util.register_dataclass
 @dataclass
 class GameState:
-    key: Array
-    placed_blocks: Array
+    key: PRNGKeyArray
+    state: UInt4[Array, "width height"]
+    reward: Float[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.float32))
+    done: Bool[Scalar, ""] = field(default_factory=lambda: jnp.array(False, dtype=jnp.bool))
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class GameStateBatch:
+    key: Shaped[PRNGKeyArray, "2"]
+    state: UInt4[Array, "steps width height"]
+    reward: Float[Array, "steps"]
+    done: Bool[Array, "steps"]
+
+
+def game_state_batch(key: PRNGKeyArray, env: gym.Env, steps: int) -> GameStateBatch:
+    return GameStateBatch(
+        key=random.split(key, steps),
+        state=jnp.zeros((steps, env.width, env.height), dtype=jnp.uint4),
+        reward=jnp.zeros(steps, dtype=jnp.float32),
+        done=jnp.zeros(steps, dtype=jnp.bool),
+    )
 
 
 class JAXTetris(gym.Env):
@@ -391,73 +411,64 @@ class JAXTetris(gym.Env):
         self.height = height
 
     @partial(jit, static_argnums=(0,))
-    def step(self, state: GameState, action: Array) -> tuple[GameState, Array, Array, dict[str, Array]]:
+    def step(self, state: GameState, action: UInt4[Array, ""]) -> GameState:
 
-        state.placed_blocks += 1
-        done = action > 0.5
-        reward = action
+        state.state += 1
+        state.done = action > 0.5
+        state.reward = action.astype(float)
 
-        state, info = self.reset_conditional(state, done)
-        return state, reward, done, info
-
-    def _get_info(self) -> dict[str, Array]:
-        return {
-            "score": jnp.zeros(shape=(1,)),
-        }
+        return self.reset_conditional(state)
 
     def _get_obs(self, state: GameState) -> Array:
-        return state.placed_blocks
+        return state.state
 
-    def reset_conditional(self, state: GameState, done: Array) -> tuple[GameState, dict[str, Array]]:
+    def reset_conditional(self, state: GameState) -> GameState:
 
-        def _continue(_) -> tuple[GameState, dict[str, Array]]:
-            return (state, self._get_info())
+        def _continue(_) -> GameState:
+            return state
 
-        return jax.lax.cond(done, self.reset, _continue, state.key)  # type: ignore
+        return jax.lax.cond(state.done, self.reset, _continue, state.key)  # type: ignore
 
     @partial(jit, static_argnums=(0,))
-    def reset(self, key: Array) -> tuple[GameState, dict[str, Array]]:
-        placed_blocks = jnp.zeros(shape=(self.width, self.height))
+    def reset(self, key: Array) -> GameState:
+
+        state = jnp.zeros(shape=(self.width, self.height), dtype=jnp.uint4)
         key, _ = random.split(key)
 
-        return GameState(key=key, placed_blocks=placed_blocks), self._get_info()
+        return GameState(key=key, state=state)
 
 
 @vmap
-def run_episodes(key: Array) -> dict[str, Array]:
+def run_episodes(key: Array) -> GameStateBatch:
 
-    batch = {
-        "keys": random.split(key, MAX_STEPS),
-        "state": jnp.zeros(shape=(MAX_STEPS, env.width, env.height)),
-        "reward": jnp.zeros(shape=(MAX_STEPS)),
-        "done": jnp.zeros(shape=(MAX_STEPS), dtype=jnp.bool_),
-    }
+    state_batch = game_state_batch(key=key, env=env, steps=steps)
+    state = env.reset(key)
 
-    state, _ = env.reset(key)
-    (state, batch) = jax.lax.fori_loop(0, MAX_STEPS, step, (state, batch))
-    return batch  # type: ignore
+    (state, state_batch) = jax.lax.fori_loop(0, steps, step, (state, state_batch))
+    return state_batch  # type: ignore
 
 
-def step(i, store: tuple[GameState, dict[str, Array]]) -> tuple[GameState, dict[str, Array]]:
-    state, batch = store
-    action = random.randint(batch["keys"][i], (1,), 0, 2)[0]
+def step(i, store: tuple[GameState, GameStateBatch]) -> tuple[GameState, GameStateBatch]:
+    state, state_batch = store
 
-    state, reward, done, info = env.step(state, action)
+    action = random.randint(state_batch.key[i], (1,), 0, 2)[0]
+    state = env.step(state, action)
 
-    batch["state"] = batch["state"].at[i].set(state.placed_blocks)
-    batch["reward"] = batch["reward"].at[i].set(reward)
-    batch["done"] = batch["done"].at[i].set(done)
+    # loop through the attributes and update the batch
+    state_batch.state = state_batch.state.at[i].set(state.state)
+    state_batch.reward = state_batch.reward.at[i].set(state.reward)
+    state_batch.done = state_batch.done.at[i].set(state.done)
 
-    return state, batch
+    return state, state_batch
 
 
 NUM_ENV = 7
-MAX_STEPS = 100
+steps = 100
 
 keys = random.split(jax.random.PRNGKey(seed=0), NUM_ENV)
 env = JAXTetris()
 
 batch = run_episodes(keys)
-done = batch["done"]
-state = batch["state"][:, :, 0, 0]
-jnp.mean(batch["done"])
+done = batch.done
+state = batch.state[:, :, 0, 0]
+jnp.mean(batch.done)
