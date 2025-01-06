@@ -364,29 +364,22 @@ class Tetris(gym.Env):
 
 @jax.tree_util.register_dataclass
 @dataclass
-class GameState:
+class State:
     key: PRNGKeyArray
-    state: UInt4[Array, "width height"]
-    reward: Float[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.float32))
-    done: Bool[Scalar, ""] = field(default_factory=lambda: jnp.array(False, dtype=jnp.bool))
+    state: UInt4[Array, "..."]
+    action: int | UInt4[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.uint4))
+    reward: float | Float[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.float32))
+    done: bool | Bool[Scalar, ""] = field(default_factory=lambda: jnp.array(False, dtype=jnp.bool))
 
 
 @jax.tree_util.register_dataclass
 @dataclass
-class GameStateBatch:
+class StateBatch:
     key: Shaped[PRNGKeyArray, "2"]
-    state: UInt4[Array, "steps width height"]
-    reward: Float[Array, "steps"]
-    done: Bool[Array, "steps"]
-
-
-def game_state_batch(key: PRNGKeyArray, env: gym.Env, steps: int) -> GameStateBatch:
-    return GameStateBatch(
-        key=random.split(key, steps),
-        state=jnp.zeros((steps, env.width, env.height), dtype=jnp.uint4),
-        reward=jnp.zeros(steps, dtype=jnp.float32),
-        done=jnp.zeros(steps, dtype=jnp.bool),
-    )
+    state: UInt4[Array, "size ..."]
+    action: UInt4[Array, "size"]
+    reward: Float[Array, "size"]
+    done: Bool[Array, "size"]
 
 
 class JAXTetris(gym.Env):
@@ -411,64 +404,81 @@ class JAXTetris(gym.Env):
         self.height = height
 
     @partial(jit, static_argnums=(0,))
-    def step(self, state: GameState, action: UInt4[Array, ""]) -> GameState:
+    def step(self, state: State) -> State:
+        state.reward = 0.0
 
         state.state += 1
-        state.done = action > 0.5
-        state.reward = action.astype(float)
+        state.done = state.action > 0
+        state.reward += state.action.astype(float)
 
         return self.reset_conditional(state)
 
-    def _get_obs(self, state: GameState) -> Array:
+    def _get_obs(self, state: State) -> Array:
         return state.state
 
-    def reset_conditional(self, state: GameState) -> GameState:
+    def reset_conditional(self, state: State) -> State:
 
-        def _continue(_) -> GameState:
+        def _continue(_) -> State:
             return state
 
         return jax.lax.cond(state.done, self.reset, _continue, state.key)  # type: ignore
 
     @partial(jit, static_argnums=(0,))
-    def reset(self, key: Array) -> GameState:
+    def reset(self, seed: Array) -> State:
 
         state = jnp.zeros(shape=(self.width, self.height), dtype=jnp.uint4)
-        key, _ = random.split(key)
+        key, _ = random.split(seed)
 
-        return GameState(key=key, state=state)
+        return State(key=key, state=state, done=True)
+
+    def reset_batch(self, seed: PRNGKeyArray, size: int) -> StateBatch:
+        return StateBatch(
+            key=random.split(seed, size),
+            state=jnp.zeros((size, self.width, self.height), dtype=jnp.uint4),
+            action=jnp.zeros(size, dtype=jnp.uint4),
+            reward=jnp.zeros(size, dtype=jnp.float32),
+            done=jnp.zeros(size, dtype=jnp.bool),
+        )
 
 
-@vmap
-def run_episodes(key: Array) -> GameStateBatch:
+def get_batch(key: Array, env: gym.Env, size: int) -> StateBatch:
 
-    state_batch = game_state_batch(key=key, env=env, steps=steps)
-    state = env.reset(key)
+    state_batch = env.reset_batch(seed=key, size=size)
+    state = env.reset(seed=key)
 
-    (state, state_batch) = jax.lax.fori_loop(0, steps, step, (state, state_batch))
+    body_fun = partial(step, env=env)
+    (state, state_batch) = jax.lax.fori_loop(
+        lower=0,
+        upper=size,
+        body_fun=body_fun,
+        init_val=(state, state_batch),
+    )
     return state_batch  # type: ignore
 
 
-def step(i, store: tuple[GameState, GameStateBatch]) -> tuple[GameState, GameStateBatch]:
+def step(i, store: tuple[State, StateBatch], env: gym.Env) -> tuple[State, StateBatch]:
+
     state, state_batch = store
-
-    action = random.randint(state_batch.key[i], (1,), 0, 2)[0]
-    state = env.step(state, action)
-
-    # loop through the attributes and update the batch
     state_batch.state = state_batch.state.at[i].set(state.state)
+
+    state.action = random.randint(state_batch.key[i], (1,), 0, 2).astype(jnp.uint4)[0]
+    state_batch.action = state_batch.action.at[i].set(state.action)
+
+    state: State = env.step(state)
+
     state_batch.reward = state_batch.reward.at[i].set(state.reward)
     state_batch.done = state_batch.done.at[i].set(state.done)
 
     return state, state_batch
 
 
-NUM_ENV = 7
-steps = 100
-
-keys = random.split(jax.random.PRNGKey(seed=0), NUM_ENV)
 env = JAXTetris()
+get_batches = vmap(partial(get_batch, env=env, size=100))
 
-batch = run_episodes(keys)
+NUM_ENV = 7
+keys = random.split(jax.random.PRNGKey(seed=0), NUM_ENV)
+batch = get_batches(keys)
+
 done = batch.done
 state = batch.state[:, :, 0, 0]
 jnp.mean(batch.done)
