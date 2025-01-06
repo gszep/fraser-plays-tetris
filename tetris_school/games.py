@@ -11,6 +11,7 @@ import pygame
 import torch
 from gymnasium import spaces
 from jax import grad, jit, random, vmap
+from jaxtyping import Array
 from torch.types import Device
 
 # rgb colors
@@ -366,7 +367,7 @@ class JAXEnv(gym.Env):
         pass
 
     @partial(jit, static_argnums=(0,))
-    def step(self, state_key, action):
+    def step(self, state_key: tuple[Array, Array], action: Array) -> tuple[tuple[Array, Array], Array, Array, dict[str, Array]]:
         state, key = state_key
 
         state += 1
@@ -376,21 +377,25 @@ class JAXEnv(gym.Env):
         state_key, info = self.reset_conditional((state, key), done)
         return state_key, reward, done, info
 
-    def _get_info(self):
+    def _get_info(self) -> dict[str, Array]:
         return {
-            "score": 0,
+            "score": jnp.zeros(shape=(1,)),
         }
 
-    def _get_obs(self, state_key):
+    def _get_obs(self, state_key: tuple[Array, Array]) -> Array:
         state, _ = state_key
         return state
 
-    def reset_conditional(self, state_key, done):
+    def reset_conditional(self, state_key: tuple[Array, Array], done: Array) -> tuple[tuple[Array, Array], dict[str, Array]]:
         state, key = state_key
-        return jax.lax.cond(done, self.reset, lambda _: (state_key, self._get_info()), key)
+
+        def _continue(_) -> tuple[tuple[Array, Array], dict[str, Array]]:
+            return (state_key, self._get_info())
+
+        return jax.lax.cond(done, self.reset, _continue, key)  # type: ignore
 
     @partial(jit, static_argnums=(0,))
-    def reset(self, key):
+    def reset(self, key: Array) -> tuple[tuple[Array, Array], dict[str, Array]]:
         state = jnp.zeros(shape=(4,))
         key, _ = random.split(key)
 
@@ -398,7 +403,7 @@ class JAXEnv(gym.Env):
 
 
 @vmap
-def run_episodes(key):
+def run_episodes(key: Array) -> dict[str, Array]:
 
     batch = {
         "keys": random.split(key, MAX_STEPS),
@@ -409,10 +414,10 @@ def run_episodes(key):
 
     state_key, _ = env.reset(key)
     (state_key, batch) = jax.lax.fori_loop(0, MAX_STEPS, step, (state_key, batch))
-    return batch
+    return batch  # type: ignore
 
 
-def step(i, store):
+def step(i, store: tuple[tuple[Array, Array], dict[str, Array]]) -> tuple[tuple[Array, Array], dict[str, Array]]:
     state_key, batch = store
     action = random.randint(batch["keys"][i], (1,), 0, 2)[0]
 
