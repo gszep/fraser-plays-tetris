@@ -394,8 +394,8 @@ class JAXTetris(gym.Env):
 
     def __init__(
         self,
-        width: int = 6,
-        height: int = 6,
+        width: int = 7,
+        height: int = 7,
         render_mode: Optional[str] = None,
         max_score: int = 100,
     ):
@@ -412,7 +412,7 @@ class JAXTetris(gym.Env):
     def step(self, state: State) -> State:
         state.reward = 0.0
 
-        state.state += 1
+        # state.state += 1
         state.done = state.action > 0
         state.reward += state.action.astype(float)
 
@@ -436,6 +436,8 @@ class JAXTetris(gym.Env):
 
         state = jnp.zeros(shape=(self.width, self.height), dtype=jnp.uint4)
         key, _ = random.split(seed)
+
+        state = state.at[self.width // 2, self.height // 2].set(1)
 
         return State(key=key, state=state, done=True)
 
@@ -465,9 +467,8 @@ class JAXTetris(gym.Env):
             for state_value, color in self.colors.items():
                 frame[state.state == state_value] = color
 
-            # frame = np.repeat(np.expand_dims(np.asarray(state.state, dtype=int), axis=-1), 3, axis=-1)
             pygame.surfarray.blit_array(self.surface, 20 * frame)
-            pygame.transform.smoothscale(self.surface, self.screen.get_size(), self.screen)
+            pygame.transform.scale(self.surface, self.screen.get_size(), self.screen)
 
         pygame.display.flip()
         # pygame.event.pump()
