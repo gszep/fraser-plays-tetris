@@ -383,9 +383,14 @@ class StateBatch:
 
 
 class JAXTetris(gym.Env):
+
     metadata = {"render_modes": ["human"], "render_fps": 1000}
     actions = Enum("actions", "NOTHING RIGHT LEFT ROTATE", start=0)
     action_space = spaces.Discrete(4)
+
+    screen: Optional[pygame.Surface] = None
+    clock: Optional[pygame.time.Clock] = None
+    colors = {0: BLACK, 1: WHITE, 2: BLUE1}
 
     def __init__(
         self,
@@ -410,6 +415,9 @@ class JAXTetris(gym.Env):
         state.state += 1
         state.done = state.action > 0
         state.reward += state.action.astype(float)
+
+        if self.render_mode == "human":
+            self._render_frame(state)
 
         return self.reset_conditional(state)
 
@@ -440,20 +448,60 @@ class JAXTetris(gym.Env):
             done=jnp.zeros(size, dtype=jnp.bool),
         )
 
+    def _render_frame(self, state: State):
+        if self.screen is None and self.render_mode == "human":
+
+            pygame.init()
+            pygame.display.init()
+            pygame.display.set_caption("Tetris")
+
+            self.screen = pygame.display.set_mode((BLOCK_SIZE * self.width, BLOCK_SIZE * self.height))
+            self.surface = pygame.Surface((self.width, self.height))
+            self.clock = pygame.time.Clock()
+
+        if self.screen is not None:
+            frame = np.zeros((*self.surface.get_size(), 3), dtype=int)
+
+            for state_value, color in self.colors.items():
+                frame[state.state == state_value] = color
+
+            # frame = np.repeat(np.expand_dims(np.asarray(state.state, dtype=int), axis=-1), 3, axis=-1)
+            pygame.surfarray.blit_array(self.surface, 20 * frame)
+            pygame.transform.smoothscale(self.surface, self.screen.get_size(), self.screen)
+
+        pygame.display.flip()
+        # pygame.event.pump()
+        # pygame.display.update()
+
+        # We need to ensure that human-rendering occurs at the predefined framerate.
+        # The following line will automatically add a delay to keep the framerate stable.
+        if self.clock is not None:
+            self.clock.tick(self.metadata["render_fps"])
+
+    def close(self):
+        if self.screen is not None:
+            pygame.display.quit()
+            pygame.quit()
+
 
 def get_batch(key: Array, env: gym.Env, size: int) -> StateBatch:
 
-    state_batch = env.reset_batch(seed=key, size=size)
-    state = env.reset(seed=key)
+    state_batch: StateBatch = env.reset_batch(seed=key, size=size)
+    state: State = env.reset(seed=key)
 
     body_fun = partial(step, env=env)
-    (state, state_batch) = jax.lax.fori_loop(
-        lower=0,
-        upper=size,
-        body_fun=body_fun,
-        init_val=(state, state_batch),
-    )
-    return state_batch  # type: ignore
+
+    if env.render_mode == "human":
+        for i in range(0, size):
+            state, state_batch = body_fun(i, (state, state_batch))
+    else:
+        (state, state_batch) = jax.lax.fori_loop(
+            lower=0,
+            upper=size,
+            body_fun=body_fun,
+            init_val=(state, state_batch),
+        )
+    return state_batch
 
 
 def step(i, store: tuple[State, StateBatch], env: gym.Env) -> tuple[State, StateBatch]:
@@ -464,7 +512,11 @@ def step(i, store: tuple[State, StateBatch], env: gym.Env) -> tuple[State, State
     state.action = random.randint(state_batch.key[i], (1,), 0, 2).astype(jnp.uint4)[0]
     state_batch.action = state_batch.action.at[i].set(state.action)
 
-    state: State = env.step(state)
+    if env.render_mode == "human":
+        with jax.disable_jit():
+            state: State = env.step(state)
+    else:
+        state: State = env.step(state)
 
     state_batch.reward = state_batch.reward.at[i].set(state.reward)
     state_batch.done = state_batch.done.at[i].set(state.done)
@@ -475,10 +527,10 @@ def step(i, store: tuple[State, StateBatch], env: gym.Env) -> tuple[State, State
 env = JAXTetris()
 get_batches = vmap(partial(get_batch, env=env, size=100))
 
-NUM_ENV = 7
+NUM_ENV = 500
 keys = random.split(jax.random.PRNGKey(seed=0), NUM_ENV)
 batch = get_batches(keys)
 
-done = batch.done
-state = batch.state[:, :, 0, 0]
-jnp.mean(batch.done)
+env = JAXTetris(render_mode="human")
+get_batch(keys[0], env, size=256)
+True
