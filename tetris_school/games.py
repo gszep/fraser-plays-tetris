@@ -408,7 +408,7 @@ class JAXTetris(gym.Env):
     def __init__(
         self,
         width: int = 7,
-        height: int = 7,
+        height: int = 14,
         render_mode: Optional[str] = None,
         max_score: int = 100,
     ):
@@ -432,6 +432,11 @@ class JAXTetris(gym.Env):
 
         state.reward += state.action.astype(float)
 
+        # apply gravity to tetromino
+        # x, y = self._tetromino(state)
+        # state.state = state.state.at[x[0], y[0]].set(0)
+        # # state.state = state.state.at[x[0], y[0] - 1].set(2)
+
         if self.render_mode == "human":
             self._render_frame(state)
 
@@ -439,32 +444,30 @@ class JAXTetris(gym.Env):
 
     @partial(jit, static_argnames=("self",))
     def _get_obs(self, state: State) -> Array:
-        x = state.environment.placed_blocks
-
         y = pallas_call(
             self._obs_kernel,
-            out_shape=jax.ShapeDtypeStruct((self.width, self.height), x.dtype),
+            out_shape=jax.ShapeDtypeStruct((self.width, self.height), state.environment.placed_blocks.dtype),
             grid=(self.width, self.height),
-        )(x)
+        )(state.environment.placed_blocks, state.environment.x, state.environment.y)
         return y  # type: ignore
 
     @partial(jit, static_argnames=("self",))
-    def _obs_kernel(self, placed_blocks: MemoryRef, output: MemoryRef):
+    def _obs_kernel(self, placed_blocks: MemoryRef, x: MemoryRef, y: MemoryRef, output: MemoryRef):
         i, j = program_id(axis=0), program_id(axis=1)
 
-        # cell = load(placed_blocks, (i, j))
+        x, y = load(x, 0), load(y, 0)
+        is_tetromino = (x == i) & (y == j)
 
-        # x, y = load(x, 0), load(y, 0)
+        def _tetrimino(x: Array) -> Array:
+            return TETROMINO + 0 * x  # needed for shape inference?
 
-        # cell = jax.lax.cond(
-        #     (x == i) & (y == j),
-        #     lambda x: jnp.int32(TETROMINO),
-        #     lambda x: x,
-        #     cell,
-        # )
+        def _not_tetrimino(x: Array) -> Array:
+            return x
 
-        store(output, (i, j), i)
+        pixel = jax.lax.cond(is_tetromino, _tetrimino, _not_tetrimino, load(placed_blocks, (i, j)))
+        store(output, (i, j), pixel)
 
+    @partial(jit, static_argnames=("self",))
     def reset_conditional(self, state: State) -> State:
 
         def _continue(_) -> State:
@@ -530,7 +533,7 @@ class JAXTetris(gym.Env):
             pygame.quit()
 
 
-def get_batch(key: Array, env: gym.Env, size: int) -> StateBatch:
+def get_batch(key: Array, env: JAXTetris, size: int) -> StateBatch:
 
     state_batch: StateBatch = env.reset_batch(seed=key, size=size)
     state: State = env.reset(seed=key)
@@ -550,7 +553,7 @@ def get_batch(key: Array, env: gym.Env, size: int) -> StateBatch:
     return state_batch
 
 
-def step(i, states: tuple[State, StateBatch], env: gym.Env) -> tuple[State, StateBatch]:
+def step(i, states: tuple[State, StateBatch], env: JAXTetris) -> tuple[State, StateBatch]:
 
     state, state_batch = states
     state_batch.obs = state_batch.obs.at[i].set(env._get_obs(state))
