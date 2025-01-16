@@ -12,7 +12,8 @@ import pygame
 import torch
 from gymnasium import spaces
 from jax import grad, jit, random, vmap
-from jaxtyping import Array, Bool, Float, PRNGKeyArray, Scalar, Shaped, UInt4
+from jax.experimental.pallas import MemoryRef, load, pallas_call, program_id, store
+from jaxtyping import Array, Bool, Float, Int32, PRNGKeyArray, Scalar, Shaped, UInt4
 from torch.types import Device
 
 # rgb colors
@@ -27,6 +28,10 @@ GRAY2 = (100, 100, 100)
 
 REWARD_COLOR = {1: (BLUE1, BLUE2), -1: (RED, RED2), 0: (GRAY, WHITE)}
 BLOCK_SIZE = 20
+
+BACKGROUND = 0
+BLOCKS = 1
+TETROMINO = 2
 
 
 class Tetris(gym.Env):
@@ -364,10 +369,18 @@ class Tetris(gym.Env):
 
 @jax.tree_util.register_dataclass
 @dataclass
+class Environment:
+    placed_blocks: UInt4[Array, "..."]
+    x: Int32[Array, "4"]
+    y: Int32[Array, "4"]
+
+
+@jax.tree_util.register_dataclass
+@dataclass
 class State:
     key: PRNGKeyArray
-    state: UInt4[Array, "..."]
-    action: int | UInt4[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.uint4))
+    environment: Environment
+    action: int | UInt4[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.int32))
     reward: float | Float[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.float32))
     done: bool | Bool[Scalar, ""] = field(default_factory=lambda: jnp.array(False, dtype=jnp.bool))
 
@@ -376,7 +389,7 @@ class State:
 @dataclass
 class StateBatch:
     key: Shaped[PRNGKeyArray, "2"]
-    state: UInt4[Array, "size ..."]
+    obs: UInt4[Array, "size ..."]
     action: UInt4[Array, "size"]
     reward: Float[Array, "size"]
     done: Bool[Array, "size"]
@@ -390,7 +403,7 @@ class JAXTetris(gym.Env):
 
     screen: Optional[pygame.Surface] = None
     clock: Optional[pygame.time.Clock] = None
-    colors = {0: BLACK, 1: WHITE, 2: BLUE1}
+    colors = {BACKGROUND: BLACK, BLOCKS: WHITE, TETROMINO: BLUE1}
 
     def __init__(
         self,
@@ -408,12 +421,15 @@ class JAXTetris(gym.Env):
         self.width = width
         self.height = height
 
-    @partial(jit, static_argnums=(0,))
+        self.tetromino_size = 1
+
+    @partial(jit, static_argnames=("self",))
     def step(self, state: State) -> State:
         state.reward = 0.0
 
-        # state.state += 1
-        state.done = state.action > 0
+        state.key, key = random.split(state.key)
+        state.done = jax.random.uniform(key) > 0.5
+
         state.reward += state.action.astype(float)
 
         if self.render_mode == "human":
@@ -421,8 +437,33 @@ class JAXTetris(gym.Env):
 
         return self.reset_conditional(state)
 
+    @partial(jit, static_argnames=("self",))
     def _get_obs(self, state: State) -> Array:
-        return state.state
+        x = state.environment.placed_blocks
+
+        y = pallas_call(
+            self._obs_kernel,
+            out_shape=jax.ShapeDtypeStruct((self.width, self.height), x.dtype),
+            grid=(self.width, self.height),
+        )(x)
+        return y  # type: ignore
+
+    @partial(jit, static_argnames=("self",))
+    def _obs_kernel(self, placed_blocks: MemoryRef, output: MemoryRef):
+        i, j = program_id(axis=0), program_id(axis=1)
+
+        # cell = load(placed_blocks, (i, j))
+
+        # x, y = load(x, 0), load(y, 0)
+
+        # cell = jax.lax.cond(
+        #     (x == i) & (y == j),
+        #     lambda x: jnp.int32(TETROMINO),
+        #     lambda x: x,
+        #     cell,
+        # )
+
+        store(output, (i, j), i)
 
     def reset_conditional(self, state: State) -> State:
 
@@ -431,21 +472,25 @@ class JAXTetris(gym.Env):
 
         return jax.lax.cond(state.done, self.reset, _continue, state.key)  # type: ignore
 
-    @partial(jit, static_argnums=(0,))
+    @partial(jit, static_argnames=("self",))
     def reset(self, seed: Array) -> State:
-
-        state = jnp.zeros(shape=(self.width, self.height), dtype=jnp.uint4)
         key, _ = random.split(seed)
 
-        state = state.at[self.width // 2, self.height // 2].set(1)
-
-        return State(key=key, state=state, done=True)
+        return State(
+            key=key,
+            environment=Environment(
+                placed_blocks=jnp.zeros(shape=(self.width, self.height), dtype=jnp.int32),
+                x=jnp.array([self.width // 2], dtype=jnp.int32),
+                y=jnp.array([self.height // 2], dtype=jnp.int32),
+            ),
+            done=True,
+        )
 
     def reset_batch(self, seed: PRNGKeyArray, size: int) -> StateBatch:
         return StateBatch(
             key=random.split(seed, size),
-            state=jnp.zeros((size, self.width, self.height), dtype=jnp.uint4),
-            action=jnp.zeros(size, dtype=jnp.uint4),
+            obs=jnp.zeros((size, self.width, self.height), dtype=jnp.int32),
+            action=jnp.zeros(size, dtype=jnp.int32),
             reward=jnp.zeros(size, dtype=jnp.float32),
             done=jnp.zeros(size, dtype=jnp.bool),
         )
@@ -464,15 +509,15 @@ class JAXTetris(gym.Env):
         if self.screen is not None:
             frame = np.zeros((*self.surface.get_size(), 3), dtype=int)
 
-            for state_value, color in self.colors.items():
-                frame[state.state == state_value] = color
+            frame[state.environment.placed_blocks == BLOCKS] = self.colors[BLOCKS]
+            frame[state.environment.x, state.environment.y] = self.colors[TETROMINO]
 
-            pygame.surfarray.blit_array(self.surface, 20 * frame)
+            pygame.surfarray.blit_array(self.surface, frame[:, ::-1])
             pygame.transform.scale(self.surface, self.screen.get_size(), self.screen)
 
         pygame.display.flip()
-        # pygame.event.pump()
-        # pygame.display.update()
+        pygame.event.pump()
+        pygame.display.update()
 
         # We need to ensure that human-rendering occurs at the predefined framerate.
         # The following line will automatically add a delay to keep the framerate stable.
@@ -505,12 +550,12 @@ def get_batch(key: Array, env: gym.Env, size: int) -> StateBatch:
     return state_batch
 
 
-def step(i, store: tuple[State, StateBatch], env: gym.Env) -> tuple[State, StateBatch]:
+def step(i, states: tuple[State, StateBatch], env: gym.Env) -> tuple[State, StateBatch]:
 
-    state, state_batch = store
-    state_batch.state = state_batch.state.at[i].set(state.state)
+    state, state_batch = states
+    state_batch.obs = state_batch.obs.at[i].set(env._get_obs(state))
 
-    state.action = random.randint(state_batch.key[i], (1,), 0, 2).astype(jnp.uint4)[0]
+    state.action = random.randint(state_batch.key[i], (1,), 0, 2).astype(jnp.int32)[0]
     state_batch.action = state_batch.action.at[i].set(state.action)
 
     if env.render_mode == "human":
