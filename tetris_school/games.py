@@ -573,7 +573,7 @@ def step(i, states: tuple[State, StateBatch], env: JAXTetris) -> tuple[State, St
 
 
 env = JAXTetris()
-get_batches = vmap(partial(get_batch, env=env, size=100))
+get_batches = jit(vmap(partial(get_batch, env=env, size=100)))
 
 NUM_ENV = 500
 keys = random.split(jax.random.PRNGKey(seed=0), NUM_ENV)
