@@ -433,14 +433,12 @@ class JAXTetris(gym.Env):
         state.reward += state.action.astype(float)
 
         # apply gravity to tetromino
-        # x, y = self._tetromino(state)
-        # state.state = state.state.at[x[0], y[0]].set(0)
-        # # state.state = state.state.at[x[0], y[0] - 1].set(2)
+        state.environment.y -= 1
 
         if self.render_mode == "human":
             self._render_frame(state)
 
-        return self.reset_conditional(state)
+        return self.reset_conditional(state)  # type: ignore
 
     @partial(jit, static_argnames=("self",))
     def _get_obs(self, state: State) -> Array:
@@ -470,10 +468,11 @@ class JAXTetris(gym.Env):
     @partial(jit, static_argnames=("self",))
     def reset_conditional(self, state: State) -> State:
 
-        def _continue(_) -> State:
+        def _continue(_: int) -> State:
             return state
 
-        return jax.lax.cond(state.done, self.reset, _continue, state.key)  # type: ignore
+        state = jax.lax.cond(state.done, self.reset, _continue, state.key)
+        return state
 
     @partial(jit, static_argnames=("self",))
     def reset(self, seed: Array) -> State:
