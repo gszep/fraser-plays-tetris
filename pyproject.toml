@@ -18,9 +18,15 @@ matplotlib = "^3.8"
 mypy = "1.11"
 numpy = "^1.26"
 pygame = "^2.5.2"
-python = "^3.11"
+python = ">=3.11,<3.13"
 torch = "^2.2"
 tqdm = "^4.66.1"
+genjax = {version = "^0.8.1", source = "gcp"}
+
+[[tool.poetry.source]]
+name = "gcp"
+priority = "explicit"
+url = "https://us-west1-python.pkg.dev/probcomp-caliban/probcomp/simple/"
 
 [build-system]
 build-backend = "poetry.core.masonry.api"
