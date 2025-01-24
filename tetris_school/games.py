@@ -421,24 +421,104 @@ class JAXTetris(gym.Env):
         self.width = width
         self.height = height
 
-        self.tetromino_size = 1
-
     @partial(jit, static_argnames=("self",))
     def step(self, state: State) -> State:
         state.reward = 0.0
 
-        state.key, key = random.split(state.key)
-        state.done = jax.random.uniform(key) > 0.5
-
-        state.reward += state.action.astype(float)
+        # move tetromino
+        state = jax.lax.switch(
+            state.action,
+            [
+                self._continue,
+                self._move_right,
+                self._move_left,
+                self._rotate,
+            ],
+            state,
+        )
 
         # apply gravity to tetromino
-        state.environment.y -= 1
+        state.environment.y -= ~self.is_vertical_collision(state)
 
-        if self.render_mode == "human":
-            self._render_frame(state)
+        # place tetromino if it hits the bottom or other blocks
+        state = jax.lax.cond(self.is_vertical_collision(state), self.tetromino, self._continue, state)
 
+        state.done = self.is_done(state)
         return self.reset_conditional(state)  # type: ignore
+
+    @partial(jit, static_argnames=("self",))
+    def _move_right(self, state: State) -> State:
+        state.environment.x += ~self.is_horizontal_collision(state, 1)
+        return state
+
+    @partial(jit, static_argnames=("self",))
+    def _move_left(self, state: State) -> State:
+        state.environment.x -= ~self.is_horizontal_collision(state, -1)
+        return state
+
+    @partial(jit, static_argnames=("self",))
+    def _rotate(self, state: State) -> State:
+        # x_median = state.environment.x.mean()
+        # y_median = state.environment.y.mean()
+
+        # x_rotated = x_median - (state.environment.y - y_median)
+        # y_rotated = y_median + (state.environment.x - x_median)
+
+        # def _rotate(x: Array, y: Array) -> tuple[Array, Array]:
+        #     return x_rotated, y_rotated
+
+        # def _continue(x: Array, y: Array) -> tuple[Array, Array]:
+        #     return x, y
+
+        # state.environment.x, state.environment.y = jax.lax.cond(
+        #     ~self.is_horizontal_collision(state, 0),
+        #     _rotate,
+        #     _continue,
+        #     state.environment.x,
+        #     state.environment.y,
+        # )
+        return state
+
+    @partial(jit, static_argnames=("self",))
+    def is_vertical_collision(self, state: State) -> Bool[Array, "size"]:
+        return (state.environment.y.min() == 0) | state.environment.placed_blocks[state.environment.x, state.environment.y - 1].any()
+
+    @partial(jit, static_argnames=("self",))
+    def is_horizontal_collision(self, state: State, move: int) -> Bool[Array, "size"]:
+        return (
+            (state.environment.x.min() == 0)
+            | (state.environment.x.max() == self.width - 1)
+            | state.environment.placed_blocks[state.environment.x + move, state.environment.y].any()
+        )
+
+    @partial(jit, static_argnames=("self",))
+    def is_done(self, state: State) -> Bool[Array, "size"]:
+        return state.environment.placed_blocks[:, -1].any()
+
+    @partial(jit, static_argnames=("self",))
+    def is_full(self, state: State) -> Bool[Array, "size"]:
+        return state.environment.placed_blocks[:, state.environment.y].all()
+
+    @partial(jit, static_argnames=("self",))
+    def clear_rows(self, state: State) -> State:
+
+        def _clear_rows(state: State) -> State:
+            state.environment.placed_blocks = state.environment.placed_blocks.at[:, state.environment.y].set(0)
+            return state
+
+        state = jax.lax.cond(self.is_full(state), _clear_rows, self._continue, state)
+        state.environment.placed_blocks = self._gravity(state)
+        return state
+
+    @partial(jit, static_argnames=("self",))
+    def tetromino(self, state: State) -> State:
+
+        state.environment.placed_blocks = state.environment.placed_blocks.at[state.environment.x, state.environment.y].set(1)
+        state = self.clear_rows(state)
+
+        state.environment.x = state.environment.x.at[0].set(self.width // 2)
+        state.environment.y = state.environment.y.at[0].set(self.height - 1)
+        return state  # type: ignore
 
     @partial(jit, static_argnames=("self",))
     def _get_obs(self, state: State) -> Array:
@@ -466,6 +546,33 @@ class JAXTetris(gym.Env):
         store(output, (i, j), pixel)
 
     @partial(jit, static_argnames=("self",))
+    def _gravity(self, state: State) -> Array:
+        y = pallas_call(
+            self._gravity_kernel,
+            out_shape=jax.ShapeDtypeStruct((self.width, self.height), state.environment.placed_blocks.dtype),
+            grid=(self.width, self.height),
+        )(state.environment.placed_blocks)
+        return y  # type: ignore
+
+    @partial(jit, static_argnames=("self",))
+    def _gravity_kernel(self, placed_blocks: MemoryRef, placed_blocks_update: MemoryRef):
+        i, j = program_id(axis=0), program_id(axis=1)
+
+        current = load(placed_blocks, (i, j))
+        store(placed_blocks_update, (i, j), current)
+
+        # below = load(placed_blocks, (i, j - 1))
+
+        # store(placed_blocks_update, (i, j - 1), current)
+
+        # def _fall(_) -> None:
+
+        # def _nothing(_) -> None:
+        #     pass
+
+        # jax.lax.cond(below == 0, _fall, _nothing, current)
+
+    @partial(jit, static_argnames=("self",))
     def reset_conditional(self, state: State) -> State:
 
         def _continue(_: int) -> State:
@@ -483,10 +590,14 @@ class JAXTetris(gym.Env):
             environment=Environment(
                 placed_blocks=jnp.zeros(shape=(self.width, self.height), dtype=jnp.int32),
                 x=jnp.array([self.width // 2], dtype=jnp.int32),
-                y=jnp.array([self.height // 2], dtype=jnp.int32),
+                y=jnp.array([self.height - 1], dtype=jnp.int32),
             ),
             done=True,
         )
+
+    @partial(jit, static_argnames=("self",))
+    def _continue(self, state: State | Array) -> State | Array:
+        return state
 
     def reset_batch(self, seed: PRNGKeyArray, size: int) -> StateBatch:
         return StateBatch(
@@ -497,7 +608,7 @@ class JAXTetris(gym.Env):
             done=jnp.zeros(size, dtype=jnp.bool),
         )
 
-    def _render_frame(self, state: State):
+    def _render(self, state: State):
         if self.screen is None and self.render_mode == "human":
 
             pygame.init()
@@ -557,17 +668,17 @@ def step(i, states: tuple[State, StateBatch], env: JAXTetris) -> tuple[State, St
     state, state_batch = states
     state_batch.obs = state_batch.obs.at[i].set(env._get_obs(state))
 
-    state.action = random.randint(state_batch.key[i], (1,), 0, 2).astype(jnp.int32)[0]
+    state.action = random.randint(state_batch.key[i], (1,), 0, 4).astype(jnp.int32)[0]
     state_batch.action = state_batch.action.at[i].set(state.action)
 
-    if env.render_mode == "human":
-        with jax.disable_jit():
-            state: State = env.step(state)
-    else:
-        state: State = env.step(state)
+    state: State = env.step(state)
 
     state_batch.reward = state_batch.reward.at[i].set(state.reward)
     state_batch.done = state_batch.done.at[i].set(state.done)
+
+    if env.render_mode == "human":
+        with jax.disable_jit():
+            env._render(state)
 
     return state, state_batch
 
