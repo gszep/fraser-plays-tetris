@@ -496,28 +496,52 @@ class JAXTetris(gym.Env):
         return state.environment.placed_blocks[:, -1].any()
 
     @partial(jit, static_argnames=("self",))
-    def is_full(self, state: State) -> Bool[Array, "size"]:
-        return state.environment.placed_blocks[:, state.environment.y].all()
+    def clear_rows_conditional(self, state: State) -> State:
+        must_clear = state.environment.placed_blocks.all(axis=0).any()
+        state = jax.lax.cond(must_clear, self.dynamic_update_slices, self._continue, state)
+        return state  # type: ignore
 
     @partial(jit, static_argnames=("self",))
-    def clear_rows(self, state: State) -> State:
+    def dynamic_update_slice(self, index: int, shift_blocks: tuple[Array, Array]) -> tuple[Array, Array]:
+        shift, blocks = shift_blocks
 
-        def _clear_rows(state: State) -> State:
-            state.environment.placed_blocks = state.environment.placed_blocks.at[:, state.environment.y].set(0)
-            return state
+        shift += blocks[:, index].all()
+        blocks = jax.lax.dynamic_update_slice(blocks, blocks[:, index + shift].reshape(-1, 1), (0, index))
 
-        state = jax.lax.cond(self.is_full(state), _clear_rows, self._continue, state)
-        state.environment.placed_blocks = self._gravity(state)
+        return shift, blocks
+
+    @partial(jit, static_argnames=("self",))
+    def dynamic_update_slices(self, state: State) -> State:
+
+        shift = 0
+        shift, state.environment.placed_blocks = jax.lax.fori_loop(
+            lower=0,
+            upper=self.height - 1,
+            body_fun=self.dynamic_update_slice,
+            init_val=(shift, state.environment.placed_blocks),
+        )
+
+        state.environment.placed_blocks = state.environment.placed_blocks.at[:, self.height - 1].set(0)
+        return state
+
+    @partial(jit, static_argnames=("self",))
+    def place_tetromino(self, state: State) -> State:
+        state.environment.placed_blocks = state.environment.placed_blocks.at[state.environment.x, state.environment.y].set(1)
+        return state
+
+    @partial(jit, static_argnames=("self",))
+    def new_tetromino(self, state: State) -> State:
+        state.environment.x = state.environment.x.at[0].set(self.width // 2)
+        state.environment.y = state.environment.y.at[0].set(self.height - 1)
         return state
 
     @partial(jit, static_argnames=("self",))
     def tetromino(self, state: State) -> State:
 
-        state.environment.placed_blocks = state.environment.placed_blocks.at[state.environment.x, state.environment.y].set(1)
-        state = self.clear_rows(state)
+        state = self.place_tetromino(state)
+        state = self.clear_rows_conditional(state)
+        state = self.new_tetromino(state)
 
-        state.environment.x = state.environment.x.at[0].set(self.width // 2)
-        state.environment.y = state.environment.y.at[0].set(self.height - 1)
         return state  # type: ignore
 
     @partial(jit, static_argnames=("self",))
@@ -544,33 +568,6 @@ class JAXTetris(gym.Env):
 
         pixel = jax.lax.cond(is_tetromino, _tetrimino, _not_tetrimino, load(placed_blocks, (i, j)))
         store(output, (i, j), pixel)
-
-    @partial(jit, static_argnames=("self",))
-    def _gravity(self, state: State) -> Array:
-        y = pallas_call(
-            self._gravity_kernel,
-            out_shape=jax.ShapeDtypeStruct((self.width, self.height), state.environment.placed_blocks.dtype),
-            grid=(self.width, self.height),
-        )(state.environment.placed_blocks)
-        return y  # type: ignore
-
-    @partial(jit, static_argnames=("self",))
-    def _gravity_kernel(self, placed_blocks: MemoryRef, placed_blocks_update: MemoryRef):
-        i, j = program_id(axis=0), program_id(axis=1)
-
-        current = load(placed_blocks, (i, j))
-        store(placed_blocks_update, (i, j), current)
-
-        # below = load(placed_blocks, (i, j - 1))
-
-        # store(placed_blocks_update, (i, j - 1), current)
-
-        # def _fall(_) -> None:
-
-        # def _nothing(_) -> None:
-        #     pass
-
-        # jax.lax.cond(below == 0, _fall, _nothing, current)
 
     @partial(jit, static_argnames=("self",))
     def reset_conditional(self, state: State) -> State:
@@ -691,5 +688,5 @@ keys = random.split(jax.random.PRNGKey(seed=0), NUM_ENV)
 batch = get_batches(keys)
 
 env = JAXTetris(render_mode="human")
-get_batch(keys[0], env, size=256)
+get_batch(keys[0], env, size=10 * 256)
 True
