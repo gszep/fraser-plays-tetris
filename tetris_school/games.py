@@ -13,7 +13,7 @@ import torch
 from gymnasium import spaces
 from jax import grad, jit, random, vmap
 from jax.experimental.pallas import MemoryRef, load, pallas_call, program_id, store
-from jaxtyping import Array, Bool, Float, Int32, PRNGKeyArray, Scalar, Shaped, UInt4
+from jaxtyping import Array, Bool, Int32, PRNGKeyArray, Scalar
 from torch.types import Device
 
 # rgb colors
@@ -370,7 +370,7 @@ class Tetris(gym.Env):
 @jax.tree_util.register_dataclass
 @dataclass
 class Environment:
-    placed_blocks: UInt4[Array, "..."]
+    placed_blocks: Int32[Array, "..."]
     x: Int32[Array, "4"]
     y: Int32[Array, "4"]
 
@@ -380,18 +380,17 @@ class Environment:
 class State:
     key: PRNGKeyArray
     environment: Environment
-    action: int | UInt4[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.int32))
-    reward: float | Float[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.float32))
+    action: int | Int32[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.int32))
+    reward: int | Int32[Scalar, ""] = field(default_factory=lambda: jnp.array(0, dtype=jnp.int32))
     done: bool | Bool[Scalar, ""] = field(default_factory=lambda: jnp.array(False, dtype=jnp.bool))
 
 
 @jax.tree_util.register_dataclass
 @dataclass
 class StateBatch:
-    key: Shaped[PRNGKeyArray, "2"]
-    obs: UInt4[Array, "size ..."]
-    action: UInt4[Array, "size"]
-    reward: Float[Array, "size"]
+    obs: Int32[Array, "size ..."]
+    action: Int32[Array, "size"]
+    reward: Int32[Array, "size"]
     done: Bool[Array, "size"]
 
 
@@ -410,12 +409,9 @@ class JAXTetris(gym.Env):
         width: int = 7,
         height: int = 14,
         render_mode: Optional[str] = None,
-        max_score: int = 100,
     ):
         assert render_mode is None or render_mode in self.metadata["render_modes"]
-
         self.render_mode = render_mode
-        self.max_score = max_score
 
         # define size of game board
         self.width = width
@@ -423,7 +419,7 @@ class JAXTetris(gym.Env):
 
     @partial(jit, static_argnames=("self",))
     def step(self, state: State) -> State:
-        state.reward = 0.0
+        state.reward = 0
 
         # move tetromino
         state = jax.lax.switch(
@@ -440,10 +436,11 @@ class JAXTetris(gym.Env):
         # apply gravity to tetromino
         state.environment.y -= ~self.is_vertical_collision(state)
 
-        # place tetromino if it hits the bottom or other blocks
+        # place tetromino if it hits the bottom or other blocks; check for full rows
         state = jax.lax.cond(self.is_vertical_collision(state), self.tetromino, self._continue, state)
 
-        state.done = self.is_done(state)
+        state = self.is_done(state)
+        state.key, _ = random.split(state.key)
         return self.reset_conditional(state)  # type: ignore
 
     @partial(jit, static_argnames=("self",))
@@ -492,8 +489,11 @@ class JAXTetris(gym.Env):
         )
 
     @partial(jit, static_argnames=("self",))
-    def is_done(self, state: State) -> Bool[Array, "size"]:
-        return state.environment.placed_blocks[:, -1].any()
+    def is_done(self, state: State) -> State:
+        state.done = state.environment.placed_blocks[:, -1].any()
+        state.reward -= state.done
+
+        return state
 
     @partial(jit, static_argnames=("self",))
     def clear_rows_conditional(self, state: State) -> State:
@@ -522,6 +522,7 @@ class JAXTetris(gym.Env):
         )
 
         state.environment.placed_blocks = state.environment.placed_blocks.at[:, self.height - 1].set(0)
+        state.reward += shift
         return state
 
     @partial(jit, static_argnames=("self",))
@@ -580,10 +581,8 @@ class JAXTetris(gym.Env):
 
     @partial(jit, static_argnames=("self",))
     def reset(self, seed: Array) -> State:
-        key, _ = random.split(seed)
-
         return State(
-            key=key,
+            key=seed,
             environment=Environment(
                 placed_blocks=jnp.zeros(shape=(self.width, self.height), dtype=jnp.int32),
                 x=jnp.array([self.width // 2], dtype=jnp.int32),
@@ -596,12 +595,11 @@ class JAXTetris(gym.Env):
     def _continue(self, state: State | Array) -> State | Array:
         return state
 
-    def reset_batch(self, seed: PRNGKeyArray, size: int) -> StateBatch:
+    def reset_batch(self, size: int) -> StateBatch:
         return StateBatch(
-            key=random.split(seed, size),
             obs=jnp.zeros((size, self.width, self.height), dtype=jnp.int32),
             action=jnp.zeros(size, dtype=jnp.int32),
-            reward=jnp.zeros(size, dtype=jnp.float32),
+            reward=jnp.zeros(size, dtype=jnp.int32),
             done=jnp.zeros(size, dtype=jnp.bool),
         )
 
@@ -640,12 +638,12 @@ class JAXTetris(gym.Env):
             pygame.quit()
 
 
-def get_batch(key: Array, env: JAXTetris, size: int) -> StateBatch:
+def get_batch(key: Array, env: JAXTetris, model, size: int) -> StateBatch:
 
-    state_batch: StateBatch = env.reset_batch(seed=key, size=size)
+    state_batch: StateBatch = env.reset_batch(size=size)
     state: State = env.reset(seed=key)
 
-    body_fun = partial(step, env=env)
+    body_fun = partial(step, env=env, model=model)
 
     if env.render_mode == "human":
         for i in range(0, size):
@@ -660,12 +658,12 @@ def get_batch(key: Array, env: JAXTetris, size: int) -> StateBatch:
     return state_batch
 
 
-def step(i, states: tuple[State, StateBatch], env: JAXTetris) -> tuple[State, StateBatch]:
+def step(i, states: tuple[State, StateBatch], env: JAXTetris, model) -> tuple[State, StateBatch]:
 
     state, state_batch = states
     state_batch.obs = state_batch.obs.at[i].set(env._get_obs(state))
 
-    state.action = random.randint(state_batch.key[i], (1,), 0, 4).astype(jnp.int32)[0]
+    state.action = model(state)
     state_batch.action = state_batch.action.at[i].set(state.action)
 
     state: State = env.step(state)
@@ -681,12 +679,19 @@ def step(i, states: tuple[State, StateBatch], env: JAXTetris) -> tuple[State, St
 
 
 env = JAXTetris()
-get_batches = jit(vmap(partial(get_batch, env=env, size=100)))
 
-NUM_ENV = 500
+
+@jit
+def model(state: State) -> Array:
+    return random.randint(state.key, (1,), 0, 4).astype(jnp.int32)[0]
+
+
+get_batches = jit(vmap(partial(get_batch, env=env, model=model, size=500)))
+
+NUM_ENV = 100
 keys = random.split(jax.random.PRNGKey(seed=0), NUM_ENV)
 batch = get_batches(keys)
 
 env = JAXTetris(render_mode="human")
-get_batch(keys[0], env, size=10 * 256)
+get_batch(keys[0], env=env, model=model, size=10 * 256)
 True
