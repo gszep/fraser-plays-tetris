@@ -4,12 +4,33 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Optional
 
+import genjax
 import jax
 import jax.numpy as jnp
+from genjax import categorical, gen, normal
 from jax import jit, random, vmap
 from jaxtyping import Array
 
 from tetris_school.games import Env, State, Tetris
+
+
+@gen
+def generative_model():
+    logits = jnp.zeros(4)
+    categorical(logits) @ "action"
+
+
+@jit
+def model(state: State) -> Array:
+    sample = generative_model.simulate(state.key, ()).get_sample()
+    return sample["action"]  # type: ignore
+
+
+key = random.key(0)
+print(model)
+# @jit
+# def model(state: State) -> Array:
+#     return random.randint(state.key, (1,), 0, 4).astype(jnp.int32)[0]
 
 
 @jax.tree_util.register_dataclass
@@ -69,10 +90,6 @@ def train(
     force: bool = False,
 ):
     game = Tetris(render_mode="human" if ui else None)
-
-    @jit
-    def model(state: State) -> Array:
-        return random.randint(state.key, (1,), 0, 4).astype(jnp.int32)[0]
 
     if ui:  # retrieve only one batch for rendering
         non_jit_fn = partial(get_batch, env=game, model=model, size=num_steps)
