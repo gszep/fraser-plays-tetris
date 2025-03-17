@@ -20,6 +20,8 @@ numpy = "^1.26"
 pygame = "^2.5.2"
 python = ">=3.11,<3.13"
 tqdm = "^4.66.1"
+pandas = "^2.2.3"
+nbconvert = "^7.16.6"
 
 [[tool.poetry.source]]
 name = "gcp"
@@ -30,6 +32,7 @@ url = "https://us-west1-python.pkg.dev/probcomp-caliban/probcomp/simple/"
 isort = "^5.13.2"
 mypy = "1.11"
 pytest = "^8.3.4"
+ipykernel = "^6.29.5"
 
 [build-system]
 build-backend = "poetry.core.masonry.api"
